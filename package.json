@@ -1,0 +1,38 @@
+{
+  "name": "opencode-eye",
+  "version": "0.1.0",
+  "description": "Route image inspection to an eye-capable model when the active model cannot see images",
+  "type": "module",
+  "main": "plugin.ts",
+  "exports": {
+    ".": "./plugin.ts"
+  },
+  "files": [
+    "plugin.ts",
+    "src/",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-ai",
+    "eye",
+    "image",
+    "multimodal"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.14",
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
