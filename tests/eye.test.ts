@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest"
-import { describeImage, parseModelSpec } from "../src/eye"
+import { describe, expect, it, vi } from "vitest"
+import { describeImage, parseModelSpec, sweepStaleEyeSessions } from "../src/eye"
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64")
 
@@ -91,7 +91,94 @@ describe("eye", () => {
       return original(opts)
     }
     await describeImage(client, "openrouter/qwen-2.5-vl-72b", { data: PNG, mime: "image/png" }, "what?")
-    expect(seenCreateBody?.title).toBe("opencode-eye image inspection")
+    expect(seenCreateBody?.title).toBe("opencode-eye · temporary (auto-deletes)")
+  })
+
+  it("defers session deletion until the configured lifetime and then deletes it", async () => {
+    vi.useFakeTimers()
+    try {
+      let deleteCalls = 0
+      const created: string[] = []
+      const destroyed: string[] = []
+      const client: any = {
+        session: {
+          create: async () => ({ data: { id: "s0" }, error: undefined, request: {}, response: {} }),
+          prompt: async () => ({ data: { info: { id: "s0" }, parts: [] }, error: undefined, request: {}, response: {} }),
+          messages: async () => ({
+            data: [{ info: { role: "assistant", finish: "stop" }, parts: [{ type: "text", text: "ok" }] }],
+            error: undefined,
+            request: {},
+            response: {},
+          }),
+          delete: async () => {
+            deleteCalls++
+            return { data: true, error: undefined, request: {}, response: {} }
+          },
+        },
+      }
+      const text = await describeImage(
+        client,
+        "openrouter/qwen-2.5-vl-72b",
+        { data: PNG, mime: "image/png" },
+        "what?",
+        {
+          onSessionCreated: (id) => created.push(id),
+          onSessionDeleted: (id) => destroyed.push(id),
+        },
+        { sessionLifetimeMs: 5_000 },
+      )
+      expect(text).toBe("ok")
+      expect(created).toEqual(["s0"])
+      expect(deleteCalls).toBe(0)
+      expect(destroyed).toEqual([])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(deleteCalls).toBe(1)
+      expect(destroyed).toEqual(["s0"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("deletes the session immediately when sessionLifetimeMs is 0", async () => {
+    let deleteCalls = 0
+    const destroyed: string[] = []
+    const client = makeClient({ s0: "a button" })
+    const original = client.session.delete
+    client.session.delete = async (opts: any) => {
+      deleteCalls++
+      return original(opts)
+    }
+    const text = await describeImage(
+      client,
+      "openrouter/qwen-2.5-vl-72b",
+      { data: PNG, mime: "image/png" },
+      "what?",
+      { onSessionDeleted: (id) => destroyed.push(id) },
+      { sessionLifetimeMs: 0 },
+    )
+    expect(text).toBe("a button")
+    expect(deleteCalls).toBe(1)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(destroyed).toEqual(["s0"])
+  })
+
+  it("still fires onSessionDeleted when the delete call fails", async () => {
+    const destroyed: string[] = []
+    const client = makeClient({ s0: "a button" })
+    client.session.delete = async () => {
+      throw new Error("delete failed")
+    }
+    const text = await describeImage(
+      client,
+      "openrouter/qwen-2.5-vl-72b",
+      { data: PNG, mime: "image/png" },
+      "what?",
+      { onSessionDeleted: (id) => destroyed.push(id) },
+      { sessionLifetimeMs: 0 },
+    )
+    expect(text).toBe("a button")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(destroyed).toEqual(["s0"])
   })
 
   it("surfaces the provider error detail", async () => {
@@ -338,5 +425,82 @@ describe("eye", () => {
     const elapsed = Date.now() - started
     expect(elapsed).toBeGreaterThanOrEqual(400)
     expect(elapsed).toBeLessThan(800)
+  })
+
+  it("sweeps stale internal eye sessions and returns the deleted count", async () => {
+    const now = Date.now()
+    const deleted: string[] = []
+    const client: any = {
+      session: {
+        list: async () => ({
+          data: [
+            { id: "stale", title: "opencode-eye · temporary (auto-deletes)", time: { created: now - 7_200_000 } },
+            { id: "fresh", title: "opencode-eye · temporary (auto-deletes)", time: { created: now - 60_000 } },
+            { id: "legacy", title: "opencode-eye image inspection", time: { created: now - 7_200_000 } },
+            { id: "near", title: "opencode-eye something else", time: { created: now - 7_200_000 } },
+            { id: "user", title: "my own session", time: { created: now - 86_400_000 } },
+          ],
+          error: undefined,
+          request: {},
+          response: {},
+        }),
+        delete: async (opts: any) => {
+          deleted.push(opts.path.id)
+          return { data: true, error: undefined, request: {}, response: {} }
+        },
+      },
+    }
+    const count = await sweepStaleEyeSessions(client, { lifetimeMs: 1_800_000 })
+    expect(count).toBe(2)
+    expect(deleted.sort()).toEqual(["legacy", "stale"])
+  })
+
+  it("returns 0 and never throws when listing sessions fails", async () => {
+    const client: any = {
+      session: {
+        list: async () => {
+          throw new Error("boom")
+        },
+      },
+    }
+    await expect(sweepStaleEyeSessions(client, { lifetimeMs: 1_800_000 })).resolves.toBe(0)
+  })
+
+  it("returns 0 when the list response is not an array", async () => {
+    const client: any = {
+      session: {
+        list: async () => ({
+          data: undefined,
+          error: { name: "APIError", data: { message: "boom", statusCode: 500, isRetryable: true } },
+          request: {},
+          response: {},
+        }),
+      },
+    }
+    await expect(sweepStaleEyeSessions(client, { lifetimeMs: 1_800_000 })).resolves.toBe(0)
+  })
+
+  it("keeps sweeping past a per-session delete failure", async () => {
+    const now = Date.now()
+    let deleteCalls = 0
+    const client: any = {
+      session: {
+        list: async () => ({
+          data: [
+            { id: "a", title: "opencode-eye · temporary (auto-deletes)", time: { created: now - 7_200_000 } },
+            { id: "b", title: "opencode-eye · temporary (auto-deletes)", time: { created: now - 7_200_000 } },
+          ],
+          error: undefined,
+          request: {},
+          response: {},
+        }),
+        delete: async () => {
+          deleteCalls++
+          if (deleteCalls === 1) throw new Error("boom")
+          return { data: true, error: undefined, request: {}, response: {} }
+        },
+      },
+    }
+    await expect(sweepStaleEyeSessions(client, { lifetimeMs: 1_800_000 })).resolves.toBe(1)
   })
 })

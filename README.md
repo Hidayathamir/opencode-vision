@@ -42,7 +42,22 @@ changing the config.
 | ------ | ------- | ----------- |
 | `eye.model` | *(none — required)* | The model used to inspect images, as `provider/model`. Any model you already use in opencode works here — the plugin reuses opencode's provider auth, no extra API keys. |
 | `eye.timeoutMs` | `60000` | Total budget for one `ask_image` call, covering sending the image and waiting for the reply. |
+| `eye.sessionLifetimeMs` | `1800000` (30 min) | How long the internal eye session stays in your session list before it is deleted. `0` deletes it immediately after inspection. |
 | `cacheDir` | `~/.cache/opencode-eye` | Where stripped images are stored (the cache files live under `<cacheDir>/img/`). |
+
+### Updating
+
+opencode caches npm plugins under `~/.cache/opencode/packages/` and reuses the
+cached copy on startup — it does not re-check npm for a newer `@latest`. After
+a new version of `opencode-eye` is published, update with one of:
+
+- **Clear the cache** (recommended): `rm -rf ~/.cache/opencode/packages/opencode-eye@latest`,
+  then restart opencode. opencode reinstalls the latest version from npm on the
+  next start.
+- **Pin a version**: write `opencode-eye@<version>` in your plugin config (e.g.
+  `opencode-eye@0.2.0`) and bump the version tag on each release. The cache is
+  keyed by the exact spec, so a new pinned version installs fresh without
+  clearing the cache.
 
 ## How it works
 
@@ -63,8 +78,9 @@ changing the config.
    disk (e.g. a screenshot).
 5. The plugin reads the file, sends it plus the question to the configured
    eye model, and returns the answer.
-6. The internal eye session is created with a fixed title and **all tools
-   disabled** (`tools: {"*": false}`):
+6. The internal eye session is created with the fixed title
+   `opencode-eye · temporary (auto-deletes)` and **all tools disabled**
+   (`tools: {"*": false}`):
    - providers that cap the number of tools per request are never hit, no
      matter how many tools your opencode session registers;
    - opencode skips title generation for the internal session, so the eye
@@ -73,6 +89,12 @@ changing the config.
    model with guidance to check `eye.model`. Failures detected on the
    internal session fail fast — the main model gets the error right away
    instead of waiting out the full timeout.
+8. The internal session is **not** deleted immediately. It stays in the
+   session list under `opencode-eye · temporary (auto-deletes)` for
+   `eye.sessionLifetimeMs` (default 30 minutes) so you can review what the eye
+   model was shown and answered, then it is removed. Sessions orphaned by an
+   opencode restart before the timer fires are swept on the next startup once
+   they are older than the lifetime.
 
 ### Behavior without an eye model
 
@@ -117,6 +139,10 @@ have referenced, not just pasted images. Consider:
 - `eye.timeoutMs` bounds the whole call. When a call exceeds the budget, the
   in-flight requests to the eye provider are aborted before the timeout is
   surfaced, so the provider stops working on them.
+- The internal eye session appears in your session list under
+  `opencode-eye · temporary (auto-deletes)` and is deleted automatically. Use
+  it to review the image and the eye model's answer while it exists; do not
+  rely on it for long-term storage.
 
 ## Manual test
 

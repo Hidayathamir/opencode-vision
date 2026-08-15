@@ -13,12 +13,19 @@ export interface EyeHooks {
 
 export interface EyeOptions {
   timeoutMs?: number
+  sessionLifetimeMs?: number
 }
 
 const SYSTEM_PROMPT =
   "You are an image analysis assistant. Answer the user's question about the attached image concisely and accurately."
 
-const INTERNAL_SESSION_TITLE = "opencode-eye image inspection"
+export const INTERNAL_SESSION_TITLE = "opencode-eye · temporary (auto-deletes)"
+export const LEGACY_INTERNAL_SESSION_TITLE = "opencode-eye image inspection"
+export const DEFAULT_SESSION_LIFETIME_MS = 1_800_000
+
+export function isInternalEyeSessionTitle(title: string): boolean {
+  return title === INTERNAL_SESSION_TITLE || title === LEGACY_INTERNAL_SESSION_TITLE
+}
 
 export function parseModelSpec(spec: string): [string, string] {
   const i = spec.indexOf("/")
@@ -77,6 +84,17 @@ async function waitForAssistantText(client: any, sessionID: string, deadline: nu
   throw new Error("Timed out waiting for eye model response")
 }
 
+function scheduleSessionDelete(client: any, sessionID: string, lifetimeMs: number, hooks?: EyeHooks): void {
+  const doDelete = () => {
+    client.session
+      .delete({ path: { id: sessionID } })
+      .catch(() => {})
+      .then(() => hooks?.onSessionDeleted?.(sessionID))
+  }
+  if (lifetimeMs <= 0) doDelete()
+  else setTimeout(doDelete, lifetimeMs).unref?.()
+}
+
 export async function describeImage(
   client: any,
   modelSpec: string,
@@ -89,6 +107,7 @@ export async function describeImage(
   if (!providerID || !modelID) throw new Error(`invalid eye model spec: ${modelSpec}`)
 
   const timeoutMs = options?.timeoutMs ?? 60_000
+  const sessionLifetimeMs = options?.sessionLifetimeMs ?? DEFAULT_SESSION_LIFETIME_MS
   const deadline = Date.now() + timeoutMs
   const controller = new AbortController()
   const signal = controller.signal
@@ -130,9 +149,29 @@ export async function describeImage(
     if (result?.error) throw new Error(`eye model error: ${errorDetail(result.error)}`)
     return await waitForAssistantText(client, session.id, deadline, controller)
   } finally {
-    await client.session.delete({ path: { id: session.id } }).catch(() => {})
-    hooks?.onSessionDeleted?.(session.id)
+    scheduleSessionDelete(client, session.id, sessionLifetimeMs, hooks)
   }
 }
 
-
+export async function sweepStaleEyeSessions(client: any, options: { lifetimeMs: number }): Promise<number> {
+  try {
+    const result: any = await client.session.list({})
+    const sessions = await unwrap<Array<any>>(result)
+    if (!Array.isArray(sessions)) return 0
+    let deleted = 0
+    for (const session of sessions) {
+      if (!session || typeof session.title !== "string") continue
+      if (!isInternalEyeSessionTitle(session.title)) continue
+      const created = session.time?.created
+      if (typeof created !== "number") continue
+      if (Date.now() - created <= options.lifetimeMs) continue
+      try {
+        await client.session.delete({ path: { id: session.id } })
+        deleted++
+      } catch {}
+    }
+    return deleted
+  } catch {
+    return 0
+  }
+}

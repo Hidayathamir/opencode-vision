@@ -25,7 +25,7 @@ Entrypoint `plugin.ts` wires the three moving parts:
   cache dir (`src/cache.ts`), and replaces them with a marker (`src/marker.ts`).
 - `ask_image` tool (`src/tool.ts`) — reads an image file and calls `src/eye.ts`
   `describeImage`, which creates an internal session, prompts the eye model, polls
-  for the assistant reply, then deletes the session.
+  for the assistant reply, then schedules the session's deletion.
 
 Supporting: `src/sdk.ts` `unwrap()` — SDK results may carry a `.data` field; every
 client call goes through it. `src/cache.ts` `resolveCacheDir()` defaults to
@@ -43,7 +43,14 @@ client call goes through it. `src/cache.ts` `resolveCacheDir()` defaults to
   the `internalSessions` Set (registered via `onSessionCreated`/`onSessionDeleted`
   from `src/eye.ts`) so the `chat.message` hook bails on them — otherwise the eye
   session's own images would re-trigger stripping in an infinite loop. The eye
-  session is created with `tools: { "*": false }` and a fixed title.
+  session is created with `tools: { "*": false }` and the title
+  `opencode-eye · temporary (auto-deletes)`. Eye sessions are **not** deleted
+  immediately: `describeImage` schedules deletion after `sessionLifetimeMs`
+  (default 30 min, `0` = immediate), and the plugin sweeps stale sessions on
+  startup via `sweepStaleEyeSessions`, matching the exact titles
+  `opencode-eye · temporary (auto-deletes)` and the legacy
+  `opencode-eye image inspection`. `onSessionDeleted` fires once the delete settles (success or failure), so
+  `internalSessions` stays accurate for the session's whole life.
 - **Tests mock the opencode SDK client by hand** with a specific shape:
   `client.config.providers()` returning `{ data: { providers: [...] } }` and
   `client.session.{create,prompt,messages,delete}`. See `tests/plugin.test.ts`.

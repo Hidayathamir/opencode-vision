@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -211,7 +211,7 @@ describe("opencode-eye plugin", () => {
         return { data: true, error: undefined, request: {}, response: {} }
       },
     }
-    const hooks = await makePlugin({ eye: { model: "openrouter/qwen-2.5-vl-72b" }, cacheDir: dir }, client)
+    const hooks = await makePlugin({ eye: { model: "openrouter/qwen-2.5-vl-72b", sessionLifetimeMs: 0 }, cacheDir: dir }, client)
     const output = { message: { id: "m1" }, parts: [imagePart()] }
     await (hooks["chat.message"] as any)({ sessionID: "s1", model: { providerID: "deepseek", modelID: "deepseek-chat" } }, output)
     const text = (output.parts[0] as any).text as string
@@ -224,6 +224,63 @@ describe("opencode-eye plugin", () => {
     )
     expect(answer).toBe("a red button")
     expect(calls).toEqual(["create", "prompt", "delete"])
+  })
+
+  it("defers the internal session deletion for eye.sessionLifetimeMs", async () => {
+    vi.useFakeTimers()
+    try {
+      const dir = tmpDir()
+      const imgPath = path.join(dir, "img.png")
+      fs.writeFileSync(imgPath, PNG)
+      const calls: string[] = []
+      let seq = 0
+      const client = providersClient("deepseek", "deepseek-chat", false)
+      client.session = {
+        list: async () => ({ data: [], error: undefined, request: {}, response: {} }),
+        create: async () => {
+          calls.push("create")
+          return { data: { id: `s${seq++}` }, error: undefined, request: {}, response: {} }
+        },
+        prompt: async (opts: any) => {
+          calls.push("prompt")
+          return { data: { info: { id: opts.path.id }, parts: [] }, error: undefined, request: {}, response: {} }
+        },
+        messages: async () => ({
+          data: [{ info: { role: "assistant", finish: "stop" }, parts: [{ type: "text", text: "a red button" }] }],
+          error: undefined,
+          request: {},
+          response: {},
+        }),
+        delete: async () => {
+          calls.push("delete")
+          return { data: true, error: undefined, request: {}, response: {} }
+        },
+      }
+      const hooks = await makePlugin({ eye: { model: "openrouter/qwen-2.5-vl-72b", sessionLifetimeMs: 5_000 }, cacheDir: dir }, client)
+      const toolDef = (hooks.tool as any).ask_image
+      const answer = await (toolDef.execute as (args: any, ctx: any) => Promise<string>)(
+        { imagePath: imgPath, question: "what color?" },
+        {},
+      )
+      expect(answer).toBe("a red button")
+      expect(calls).toEqual(["create", "prompt"])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(calls).toEqual(["create", "prompt", "delete"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("runs the stale-session sweep at init without breaking startup", async () => {
+    const client = providersClient("deepseek", "deepseek-chat", false)
+    const listSpy = vi.fn(async () => {
+      throw new Error("boom")
+    })
+    client.session = { list: listSpy }
+    const hooks = await makePlugin({ eye: { model: "openrouter/qwen-2.5-vl-72b" }, cacheDir: tmpDir() }, client)
+    expect(hooks.tool).toBeDefined()
+    expect((hooks.tool as any).ask_image).toBeDefined()
+    expect(listSpy).toHaveBeenCalled()
   })
 
   it("does not strip images from its own internal eye sessions", async () => {

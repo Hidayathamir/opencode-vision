@@ -1,6 +1,6 @@
 {
   "name": "opencode-eye",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Route image inspection to an eye-capable model when the active model cannot see images",
   "type": "module",
   "main": "plugin.ts",

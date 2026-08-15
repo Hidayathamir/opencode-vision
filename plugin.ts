@@ -2,11 +2,11 @@ import type { Hooks } from "@opencode-ai/plugin"
 import { Detector, getImageSupport } from "./src/detect"
 import { decodeDataUrl, readImageFile, resolveCacheDir, writeImage } from "./src/cache"
 import { buildMarker } from "./src/marker"
-import { describeImage, type ImageInput } from "./src/eye"
+import { describeImage, sweepStaleEyeSessions, type ImageInput, DEFAULT_SESSION_LIFETIME_MS } from "./src/eye"
 import { askImageTool } from "./src/tool"
 
 export interface OpencodeEyeOptions {
-  eye?: { model?: string; timeoutMs?: number }
+  eye?: { model?: string; timeoutMs?: number; sessionLifetimeMs?: number }
   cacheDir?: string
 }
 
@@ -19,9 +19,11 @@ export const OpencodeEye: (input: { client: any }, options?: OpencodeEyeOptions)
 ) => {
   const model = options.eye?.model ?? ""
   const timeoutMs = options.eye?.timeoutMs ?? 60_000
+  const sessionLifetimeMs = options.eye?.sessionLifetimeMs ?? DEFAULT_SESSION_LIFETIME_MS
   const cacheDir = resolveCacheDir(options.cacheDir)
   const detector = new Detector()
   const internalSessions = new Set<string>()
+  void sweepStaleEyeSessions(client, { lifetimeMs: sessionLifetimeMs }).catch(() => {})
 
   const isEyeModel = (ref: { providerID: string; modelID: string }) =>
     model !== "" && model === `${ref.providerID}/${ref.modelID}`
@@ -105,7 +107,7 @@ export const OpencodeEye: (input: { client: any }, options?: OpencodeEyeOptions)
           describeImage(client, model, image, question, {
             onSessionCreated: (id) => internalSessions.add(id),
             onSessionDeleted: (id) => internalSessions.delete(id),
-          }, { timeoutMs }),
+          }, { timeoutMs, sessionLifetimeMs }),
       }),
     },
   }
